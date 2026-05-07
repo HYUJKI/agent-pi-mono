@@ -1,0 +1,17 @@
+{
+	"name": "pimono-agent",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"packages/*",
+		"app"
+	],
+	"scripts": {
+		"build": "npm run build --workspace=packages/ai && npm run build --workspace=packages/agent && npm run build --workspace=app",
+		"dev": "npm run dev --workspace=app",
+		"clean": "rm -rf packages/*/dist app/dist node_modules"
+	},
+	"engines": {
+		"node": ">=20.0.0"
+	}
+}

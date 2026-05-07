@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(npm view pi-mono)",
+      "WebFetch(domain:github.com)",
+      "Bash(git clone https://github.com/badlogic/pi-mono.git \"D:\\\\work\\\\project\\\\pimono-agent\\\\pi-mono\")",
+      "Bash(git checkout)",
+      "Bash(git fetch --all)",
+      "Bash(npm install)",
+      "Bash(npm install --ignore-scripts)",
+      "Bash(npx tsgo --version)",
+      "Bash(tsc --version)",
+      "Bash(npm run build)",
+      "Bash(npm run build --workspace=app)"
+    ]
+  }
+}
