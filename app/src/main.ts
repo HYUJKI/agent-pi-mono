@@ -1,262 +1,712 @@
-import { Agent } from "@mariozechner/pi-agent-core";
-import { getModel } from "@mariozechner/pi-ai";
 import "./styles.css";
-
-// Get base URL - use proxy to avoid CORS
-const API_BASE_URL = "http://localhost:3002"; // Local proxy
-
-// Get API key from user or environment
-const API_KEY = localStorage.getItem("anthropic-api-key") || prompt("Enter Minimax API Token:");
-if (API_KEY) {
-	localStorage.setItem("anthropic-api-key", API_KEY);
-}
+import hljs from "highlight.js";
 
 // State
-let agent: Agent;
-let messages: Array<{ role: string; content: string }> = [];
-let isLoading = false;
-let streamingContent = "";
-let currentAssistantIndex = -1; // Track current assistant message index
-let pendingMessageEnd = false; // Track if we've received message_start but not yet message_end
-
-// Get model with custom baseUrl for proxy
-function createModel() {
-	const baseModel = getModel("minimax-cn", "MiniMax-M2.7" as any);
-	return {
-		...baseModel,
-		baseUrl: API_BASE_URL,
-	};
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  attachments?: Attachment[];
+  timestamp: number;
 }
 
-// Initialize agent
-function initAgent() {
-	agent = new Agent({
-		getApiKey: () => API_KEY,
-		initialState: {
-			systemPrompt: `You are a helpful AI assistant. Follow these rules strictly:
+interface Attachment {
+  type: "image" | "file";
+  name: string;
+  url?: string;
+  path?: string;
+  content?: string;
+}
 
-1. The conversation history (user/assistant messages) is ONLY for context - it helps you understand the background and follow the conversation flow.
+interface StreamContent {
+  type: "text" | "tool" | "image" | "file";
+  content: string;
+  toolName?: string;
+  fileName?: string;
+  downloadUrl?: string;
+}
 
-2. You must ONLY respond to the LAST user message in the conversation. Do NOT repeat or answer any previous user questions.
+let messages: Message[] = [];
+let sessionId: string | null = null;
+let isLoading = false;
+let currentStreamContent: StreamContent[] = [];
 
-3. Do not restate or summarize previous questions or answers. Focus only on the latest user question.
+// DOM Elements cache
+let chatArea: HTMLElement;
+let inputArea: HTMLElement;
+let messageInput: HTMLTextAreaElement;
+let fileInput: HTMLInputElement;
+let imageInput: HTMLInputElement;
+let attachmentsPreview: HTMLElement;
+let statusDot: HTMLElement;
 
-4. Ignore any user messages that appear before the final user message - they are only for context.
+// Pending attachments
+let pendingAttachments: Attachment[] = [];
 
-5. Your response should address the latest questions based on conversation history.
+// Initialize
+function init() {
+  renderApp();
+  loadSession();
+  setupEventListeners();
+}
 
-Example:
-- If history has: "What is AI?" followed by "Tell me about ML", you should answer "Tell me about ML" based on conversation history`,
-			model: createModel(),
-			thinkingLevel: "off",
-			messages: [],
-			tools: [],
-		},
-		convertToLlm: (agentMessages) => {
-			// Debug: log what we received
-			console.log("convertToLlm called, agentMessages count:", agentMessages.length);
-			for (const m of agentMessages) {
-				const contentPreview = Array.isArray(m.content)
-					? m.content.map((c: any) => c.text || c.thinking || String(c)).join("")
-					: typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-				console.log("  - role:", m.role, "content:", contentPreview.substring(0, 80));
-			}
+// Render main app
+function renderApp() {
+  const app = document.getElementById("app");
+  if (!app) return;
 
-			// Messages must strictly alternate: user → assistant → user → assistant → user
-			const MAX_CONTEXT = 30;
-			const recentMessages = agentMessages.slice(-MAX_CONTEXT);
+  app.innerHTML = `
+    <div class="app-container">
+      <!-- Header -->
+      <header class="header">
+        <div class="header-title">
+          <div class="header-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <div class="header-text">
+            <h1>Pi Agent</h1>
+            <span>TUI Interface</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="header-btn" id="clearBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            Clear
+          </button>
+          <button class="header-btn primary" id="newChatBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            New Chat
+          </button>
+        </div>
+      </header>
 
-			// Helper to extract text from content (which can be string, array of blocks, or object)
-			function extractText(content: any): string {
-				if (!content) return "";
-				if (typeof content === "string") return content;
-				if (Array.isArray(content)) {
-					return content.map((block: any) => {
-						if (typeof block === "string") return block;
-						return block.text || block.thinking || "";
-					}).join("");
-				}
-				if (typeof content === "object") {
-					return content.text || JSON.stringify(content);
-				}
-				return String(content);
-			}
+      <!-- Status Bar -->
+      <div class="status-bar">
+        <div class="status-left">
+          <div class="status-item">
+            <span class="status-dot ${isLoading ? 'warning' : ''}" id="statusDot"></span>
+            <span>${isLoading ? 'Processing...' : 'Ready'}</span>
+          </div>
+          <div class="status-item">
+            <span>Session: ${sessionId ? sessionId.substring(0, 8) + '...' : 'None'}</span>
+          </div>
+        </div>
+        <div class="status-right">
+          <div class="status-item">
+            <span>Messages: ${messages.length}</span>
+          </div>
+          <div class="status-item">
+            <span>Model: MiniMax-M2.7</span>
+          </div>
+        </div>
+      </div>
 
-			// Convert to the format we need
-			const converted = recentMessages.map((m: any) => {
-				if (m.role === "user" || m.role === "user-with-attachments") {
-					const content = extractText(m.content);
-					return { role: "user" as const, content };
-				}
-				if (m.role === "assistant") {
-					const content = extractText(m.content);
-					return { role: "assistant" as const, content };
-				}
-				return null;
-			}).filter(Boolean);
+      <!-- Chat Area -->
+      <main class="chat-area" id="chatArea">
+        ${
+          messages.length === 0
+            ? `
+          <div class="welcome-screen">
+            <div class="welcome-logo">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+            </div>
+            <h2 class="welcome-title">Pi Agent</h2>
+            <p class="welcome-subtitle">Terminal-style AI Assistant Interface</p>
+            <div class="welcome-commands">
+              <div class="welcome-command">
+                <span class="welcome-command-prefix">$</span>
+                <span class="welcome-command-desc">Read, write, and edit local files</span>
+              </div>
+              <div class="welcome-command">
+                <span class="welcome-command-prefix">$</span>
+                <span class="welcome-command-desc">Web search for real-time information</span>
+              </div>
+              <div class="welcome-command">
+                <span class="welcome-command-prefix">$</span>
+                <span class="welcome-command-desc">Multi-round context memory</span>
+              </div>
+              <div class="welcome-command">
+                <span class="welcome-command-prefix">$</span>
+                <span class="welcome-command-desc">Code highlighting and streaming output</span>
+              </div>
+            </div>
+          </div>
+        `
+            : `
+          <div class="messages-container" id="messagesContainer">
+            ${messages.map((m) => renderMessage(m)).join("")}
+          </div>
+          ${
+            isLoading
+              ? `
+            <div class="loading-indicator">
+              <span class="typing-cursor"></span>
+              <span>Thinking...</span>
+            </div>
+          `
+              : ""
+          }
+        `
+        }
+      </main>
 
-			// Ensure strict alternation
-			const result: Array<{ role: string; content: string }> = [];
+      <!-- Input Area -->
+      <footer class="input-area" id="inputArea">
+        <div class="input-container">
+          <!-- Attachments Preview -->
+          <div class="attachments-preview" id="attachmentsPreview"></div>
 
-			// Find the last user message (current question)
-			let lastUserIdx = -1;
-			for (let i = converted.length - 1; i >= 0; i--) {
-				if (converted[i].role === "user") {
-					lastUserIdx = i;
-					break;
-				}
-			}
+          <!-- Toolbar -->
+          <div class="input-toolbar">
+            <label class="input-btn" title="Upload File">
+              <input type="file" id="fileInput" multiple hidden />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+              </svg>
+            </label>
+            <label class="input-btn" title="Upload Image">
+              <input type="file" id="imageInput" accept="image/*" multiple hidden />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                <polyline points="21 15 16 10 5 21"></polyline>
+              </svg>
+            </label>
+          </div>
 
-			if (lastUserIdx === -1) {
-				return [];
-			}
+          <!-- Input Wrapper -->
+          <div class="input-wrapper">
+            <textarea
+              id="messageInput"
+              placeholder="Enter your message..."
+              rows="1"
+              ${isLoading ? "disabled" : ""}
+            ></textarea>
+            <div class="input-actions">
+              <button class="send-btn" id="sendBtn" ${isLoading ? "disabled" : ""}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </div>
+  `;
 
-			// If this is the first message (no history), just return it
-			if (lastUserIdx === 0) {
-				result.push(converted[0]);
-				return result;
-			}
+  // Cache DOM elements
+  chatArea = document.getElementById("chatArea")!;
+  inputArea = document.getElementById("inputArea")!;
+  messageInput = document.getElementById("messageInput") as HTMLTextAreaElement;
+  fileInput = document.getElementById("fileInput") as HTMLInputElement;
+  imageInput = document.getElementById("imageInput") as HTMLInputElement;
+  attachmentsPreview = document.getElementById("attachmentsPreview")!;
+  statusDot = document.getElementById("statusDot")!;
 
-			// Only keep the IMMEDIATE previous pair (one user + one assistant) as brief context
-			// Skip older history to avoid repetition and token bloat
-			const immediateContextStart = Math.max(0, lastUserIdx - 2);
+  // Auto-resize textarea
+  autoResize(messageInput);
 
-			result.push({
-				role: "system",
-				content: "[Previous context for reference only]"
-			});
+  // Scroll to bottom
+  scrollToBottom();
+}
 
-			// Only add the most recent exchange as context
-			for (let i = immediateContextStart; i < lastUserIdx; i++) {
-				result.push(converted[i]);
-			}
+// Render a single message
+function renderMessage(msg: Message): string {
+  const time = new Date(msg.timestamp).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
-			result.push(converted[lastUserIdx]);
+  const avatarIcon = msg.role === "user" ? "U" : "AI";
 
-			// Debug: log the final result
-			console.log("convertToLlm result:");
-			for (const r of result) {
-				console.log("  - role:", r.role, "content length:", r.content.length, "preview:", r.content.substring(0, 50));
-			}
+  const attachmentsHtml =
+    msg.attachments && msg.attachments.length > 0
+      ? `<div class="message-attachments">
+          ${msg.attachments.map((a) => {
+            if (a.type === "image") {
+              return `<div class="attachment"><img src="${a.url || a.content}" alt="${a.name}" /></div>`;
+            } else {
+              return `<div class="attachment-file">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                </svg>
+                ${a.name}
+              </div>`;
+            }
+          }).join("")}
+        </div>`
+      : "";
 
-			return result;
-		},
-	});
-	console.log("Agent initialized successfully");
+  const hasToolContent = currentStreamContent.some((c) => c.type === "tool");
 
-	agent.subscribe((event: any) => {
-		if (event.type === "message_start") {
-			if (event.message?.role === "user") {
-				// User message started - add it to UI immediately
-				messages.push({ role: "user", content: event.message.content?.[0]?.text || "" });
-			}
-			if (event.message?.role === "assistant") {
-				streamingContent = "";
-				currentAssistantIndex = -1;
-				pendingMessageEnd = false;
-			}
-		}
-		if (event.type === "message_update") {
-			const msg = event.message;
-			let text = "";
-			if (msg.content && Array.isArray(msg.content)) {
-				for (const block of msg.content) {
-					if (block.type === "text" && block.text) {
-						text += block.text;
-					}
-				}
-			}
+  return `
+    <div class="message ${msg.role}">
+      <div class="message-avatar">${avatarIcon}</div>
+      <div class="message-content-wrapper">
+        <div class="message-role">${msg.role === "user" ? "User" : "Assistant"}</div>
+        ${attachmentsHtml}
+        <div class="message-content ${hasToolContent ? "has-tool" : ""}">${formatContent(msg.content)}</div>
+        <div class="message-time">${time}</div>
+      </div>
+    </div>
+  `;
+}
 
-			if (text.length > 0 && msg?.role === "assistant") {
-				if (currentAssistantIndex === -1) {
-					messages.push({ role: "assistant", content: text });
-					currentAssistantIndex = messages.length - 1;
-				} else {
-					messages[currentAssistantIndex].content = text;
-				}
-			}
-			renderUI();
-		}
-		if (event.type === "message_end") {
-			if (event.message?.role === "assistant") {
-				if (!pendingMessageEnd) {
-					isLoading = false;
-					streamingContent = "";
-					currentAssistantIndex = -1;
-					pendingMessageEnd = true;
-					renderUI();
-				}
-			}
-		}
-	});
+// Format message content with code highlighting
+function formatContent(content: string): string {
+  if (!content) return "";
+
+  // Escape HTML first
+  let formatted = escapeHtml(content);
+
+  // Code blocks with highlighting
+  formatted = formatted.replace(
+    /```(\w+)?\n([\s\S]*?)```/g,
+    (_, lang, code) => {
+      const language = lang || "plaintext";
+      let highlighted: string;
+      try {
+        highlighted = hljs.highlight(code.trim(), { language }).value;
+      } catch {
+        highlighted = escapeHtml(code.trim());
+      }
+      return `
+        <div class="code-block">
+          <div class="code-header">
+            <div class="code-dots">
+              <span class="code-dot red"></span>
+              <span class="code-dot yellow"></span>
+              <span class="code-dot green"></span>
+            </div>
+            <span class="code-language">${language}</span>
+            <button class="code-copy" onclick="copyCode(this)">Copy</button>
+          </div>
+          <pre><code class="hljs language-${language}">${highlighted}</code></pre>
+        </div>
+      `;
+    }
+  );
+
+  // Inline code
+  formatted = formatted.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+
+  // Bold
+  formatted = formatted.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+
+  // Italic
+  formatted = formatted.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+
+  // Links
+  formatted = formatted.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener">$1</a>'
+  );
+
+  // Tool indicators in text
+  formatted = formatted.replace(
+    /\[(使用工具|Using tool): ([^\]]+)\]/g,
+    '<div class="tool-indicator"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg> $2</div>'
+  );
+
+  // Lists
+  formatted = formatted.replace(/^- (.+)$/gm, "<li>$1</li>");
+  formatted = formatted.replace(/(<li>.*<\/li>)/s, "<ul>$1</ul>");
+
+  // Line breaks
+  formatted = formatted.replace(/\n/g, "<br>");
+
+  // Download links for generated files
+  formatted = formatted.replace(
+    /\[下载文件: ([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" download="$1" class="download-btn">📥 $1</a>'
+  );
+
+  // Image display
+  formatted = formatted.replace(
+    /!\[([^\]]*)\]\(([^)]+)\)/g,
+    '<img src="$2" alt="$1" class="message-image" />'
+  );
+
+  return formatted;
+}
+
+// Escape HTML special characters
+function escapeHtml(text: string): string {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Render streaming content
+function renderStreamingContent() {
+  const messagesContainer = document.getElementById("messagesContainer");
+  if (!messagesContainer) return;
+
+  const lastMessage = messagesContainer.querySelector(".message.assistant:last-child");
+  if (!lastMessage) return;
+
+  const contentEl = lastMessage.querySelector(".message-content") as HTMLElement;
+  if (!contentEl) return;
+
+  let html = "";
+  let hasTool = false;
+
+  for (const item of currentStreamContent) {
+    if (item.type === "text") {
+      html += formatContent(item.content);
+    } else if (item.type === "tool") {
+      hasTool = true;
+      html += `<div class="tool-indicator">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+        </svg>
+        ${item.toolName}
+      </div>`;
+    } else if (item.type === "image") {
+      html += `<img src="${item.content}" alt="Generated" class="message-image" />`;
+    } else if (item.type === "file") {
+      html += `<a href="${item.downloadUrl}" download="${item.fileName}" class="download-btn">📥 ${item.fileName}</a>`;
+    }
+  }
+
+  contentEl.className = `message-content ${hasTool ? "has-tool" : ""}`;
+  contentEl.innerHTML = html;
+
+  // Apply syntax highlighting to new code blocks
+  contentEl.querySelectorAll("code.hljs").forEach((block) => {
+    hljs.highlightElement(block as HTMLElement);
+  });
+
+  scrollToBottom();
+}
+
+// Update attachments preview
+function updateAttachmentsPreview() {
+  if (!attachmentsPreview) return;
+
+  if (pendingAttachments.length === 0) {
+    attachmentsPreview.innerHTML = "";
+    return;
+  }
+
+  attachmentsPreview.innerHTML = pendingAttachments
+    .map(
+      (a, i) => `
+    <div class="attachment-item">
+      ${
+        a.type === "image"
+          ? `<img src="${a.content}" alt="${a.name}" />`
+          : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+            </svg>`
+      }
+      <span>${a.name}</span>
+      <button class="attachment-remove" onclick="removeAttachment(${i})">×</button>
+    </div>
+  `
+    )
+    .join("");
+}
+
+// Remove attachment
+(window as any).removeAttachment = (index: number) => {
+  pendingAttachments.splice(index, 1);
+  updateAttachmentsPreview();
+};
+
+// Copy code
+(window as any).copyCode = async (btn: HTMLButtonElement) => {
+  const code = btn.closest(".code-block")?.querySelector("code")?.textContent;
+  if (code) {
+    await navigator.clipboard.writeText(code);
+    btn.textContent = "Copied!";
+    setTimeout(() => (btn.textContent = "Copy"), 2000);
+  }
+};
+
+// Auto-resize textarea
+function autoResize(textarea: HTMLTextAreaElement) {
+  textarea.addEventListener("input", () => {
+    textarea.style.height = "auto";
+    textarea.style.height = Math.min(textarea.scrollHeight, 150) + "px";
+  });
+
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+}
+
+// Setup event listeners
+function setupEventListeners() {
+  document.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+
+    // New chat button
+    if (target.closest("#newChatBtn")) {
+      newChat();
+    }
+
+    // Clear button
+    if (target.closest("#clearBtn")) {
+      messages = [];
+      saveSession();
+      renderApp();
+    }
+
+    // Send button
+    if (target.closest("#sendBtn") && !isLoading) {
+      sendMessage();
+    }
+  });
+
+  // File input
+  fileInput?.addEventListener("change", async (e) => {
+    const files = (e.target as HTMLInputElement).files;
+    if (files) {
+      for (const file of Array.from(files)) {
+        const content = await file.text();
+        pendingAttachments.push({
+          type: "file",
+          name: file.name,
+          content,
+        });
+      }
+      updateAttachmentsPreview();
+    }
+    fileInput.value = "";
+  });
+
+  // Image input
+  imageInput?.addEventListener("change", async (e) => {
+    const files = (e.target as HTMLInputElement).files;
+    if (files) {
+      for (const file of Array.from(files)) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          pendingAttachments.push({
+            type: "image",
+            name: file.name,
+            content: e.target?.result as string,
+          });
+          updateAttachmentsPreview();
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+    imageInput.value = "";
+  });
 }
 
 // Send message
-async function sendMessage(content: string) {
-	if (!agent || isLoading) return;
+async function sendMessage() {
+  const content = messageInput?.value.trim();
+  if (!content && pendingAttachments.length === 0) return;
+  if (isLoading) return;
 
-	isLoading = true;
-	pendingMessageEnd = false;
-	renderUI();
+  isLoading = true;
+  currentStreamContent = [];
 
-	try {
-		await agent.prompt(content);
-	} catch (err) {
-		isLoading = false;
-		pendingMessageEnd = true;
-		messages.push({ role: "assistant", content: `Error: ${err}` });
-		renderUI();
-	}
+  // Add user message
+  const userMessage: Message = {
+    id: generateId(),
+    role: "user",
+    content: content || "",
+    attachments: [...pendingAttachments],
+    timestamp: Date.now(),
+  };
+  messages.push(userMessage);
+
+  // Clear input
+  if (messageInput) {
+    messageInput.value = "";
+    messageInput.style.height = "auto";
+  }
+  pendingAttachments = [];
+  updateAttachmentsPreview();
+
+  // Render user message
+  renderApp();
+
+  // Add placeholder for assistant
+  const assistantMessage: Message = {
+    id: generateId(),
+    role: "assistant",
+    content: "",
+    timestamp: Date.now(),
+  };
+  messages.push(assistantMessage);
+
+  // Render initial assistant message with loading
+  const assistantEl = document.querySelector('.message.assistant:last-child .message-content');
+  if (assistantEl) {
+    (assistantEl as HTMLElement).innerHTML = '<span class="typing-cursor"></span>';
+  }
+  scrollToBottom();
+
+  try {
+    // Prepare attachments for API
+    const attachments = userMessage.attachments?.map((a) => ({
+      type: a.type,
+      name: a.name,
+      url: a.type === "image" ? a.content : undefined,
+      path: a.type === "file" ? a.name : undefined,
+    }));
+
+    // Send to API
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content,
+        session_id: sessionId,
+        attachments,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error: ${response.status}`);
+    }
+
+    // Handle SSE stream
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+
+    while (reader) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      console.log("SSE chunk:", chunk);
+      const lines = chunk.split("\n");
+
+      for (const line of lines) {
+        if (line.startsWith("event:")) {
+          console.log("SSE event:", line);
+          continue;
+        }
+
+        if (line.startsWith("data:")) {
+          const data = line.replace("data:", "").trim();
+          if (!data) continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            console.log("SSE data:", parsed);
+
+            if (parsed.content) {
+              currentStreamContent = [{ type: "text", content: parsed.content }];
+              const lastAssistant = messages[messages.length - 1];
+              if (lastAssistant && lastAssistant.role === "assistant") {
+                lastAssistant.content = parsed.content;
+              }
+              renderStreamingContent();
+            } else if (parsed.type === "tool_start") {
+              currentStreamContent.push({
+                type: "tool",
+                content: "",
+                toolName: parsed.tool,
+              });
+              renderStreamingContent();
+            } else if (parsed.type === "tool_end") {
+              // Tool finished
+            } else if (parsed.type === "agent_end") {
+              if (messages[messages.length - 1]?.role === "assistant") {
+                messages[messages.length - 1].content = currentStreamContent
+                  .filter((c) => c.type === "text")
+                  .map((c) => c.content)
+                  .join("");
+              }
+            }
+          } catch (e) {
+            console.error("JSON parse error:", e, "data:", data);
+          }
+        }
+      }
+    }
+  } catch (error: any) {
+    console.error("Send error:", error);
+    // Remove the placeholder assistant message on error
+    if (messages.length > 0 && messages[messages.length - 1]?.role === "assistant" && !messages[messages.length - 1]?.content) {
+      messages.pop(); // Remove empty placeholder
+    }
+    // Show error as a new assistant message
+    messages.push({
+      id: generateId(),
+      role: "assistant",
+      content: `Error: ${error.message}`,
+      timestamp: Date.now(),
+    });
+  }
+
+  isLoading = false;
+  renderApp();
+  saveSession();
 }
 
-// Render UI
-function renderUI() {
-	const app = document.getElementById("app");
-	if (!app) return;
-
-	app.innerHTML = `
-		<div class="chat-container">
-			<div class="header">
-				<h1>Pi Agent</h1>
-				<p class="subtitle">Simple AI Chat</p>
-			</div>
-			<div class="messages">
-				${messages.map((m) => `
-					<div class="message ${m.role}">
-						<div class="message-role">${m.role === "user" ? "You" : "Assistant"}</div>
-						<div class="message-content">${escapeHtml(m.content)}</div>
-					</div>
-				`).join("")}
-			</div>
-			<div class="input-area">
-				<form id="input-form">
-					<input type="text" id="message-input" placeholder="Type a message..." ${isLoading ? "disabled" : ""} />
-					<button type="submit" ${isLoading ? "disabled" : ""}>Send</button>
-				</form>
-			</div>
-		</div>
-	`;
-
-	document.getElementById("input-form")?.addEventListener("submit", async (e) => {
-		e.preventDefault();
-		const input = document.getElementById("message-input") as HTMLInputElement;
-		if (input?.value.trim()) {
-			await sendMessage(input.value.trim());
-			input.value = "";
-		}
-	});
+// New chat
+function newChat() {
+  messages = [];
+  sessionId = null;
+  pendingAttachments = [];
+  currentStreamContent = [];
+  localStorage.removeItem("pimono_session");
+  localStorage.removeItem("pimono_messages");
+  renderApp();
 }
 
-function escapeHtml(text: string): string {
-	const div = document.createElement("div");
-	div.textContent = text;
-	return div.innerHTML;
+// Save session
+function saveSession() {
+  if (sessionId) {
+    localStorage.setItem("pimono_session", sessionId);
+  }
+  localStorage.setItem("pimono_messages", JSON.stringify(messages));
 }
 
-// Start
-if (!API_KEY) {
-	document.getElementById("app")!.innerHTML = '<p style="color:red">API key required. Please refresh and enter a key.</p>';
-} else {
-	initAgent();
-	renderUI();
+// Load session
+function loadSession() {
+  const savedSession = localStorage.getItem("pimono_session");
+  const savedMessages = localStorage.getItem("pimono_messages");
+
+  if (savedMessages) {
+    try {
+      messages = JSON.parse(savedMessages);
+    } catch {
+      messages = [];
+    }
+  }
+
+  sessionId = savedSession;
 }
+
+// Scroll to bottom
+function scrollToBottom() {
+  if (chatArea) {
+    chatArea.scrollTop = chatArea.scrollHeight;
+  }
+}
+
+// Generate unique ID
+function generateId(): string {
+  return Math.random().toString(36).substring(2, 15);
+}
+
+// Start app
+init();

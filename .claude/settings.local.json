@@ -12,7 +12,8 @@
       "Bash(npx tsgo --version)",
       "Bash(tsc --version)",
       "Bash(npm run build)",
-      "Bash(npm run build --workspace=app)"
+      "Bash(npm run build --workspace=app)",
+      "Bash(cd /d D:workprojectpimono-agent)"
     ]
   }
 }
