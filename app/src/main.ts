@@ -33,46 +33,123 @@ function initAgent() {
 	agent = new Agent({
 		getApiKey: () => API_KEY,
 		initialState: {
-			systemPrompt: "You are a helpful AI assistant. Respond clearly and concisely.",
+			systemPrompt: `You are a helpful AI assistant. Follow these rules strictly:
+
+1. The conversation history (user/assistant messages) is ONLY for context - it helps you understand the background and follow the conversation flow.
+
+2. You must ONLY respond to the LAST user message in the conversation. Do NOT repeat or answer any previous user questions.
+
+3. Do not restate or summarize previous questions or answers. Focus only on the latest user question.
+
+4. Ignore any user messages that appear before the final user message - they are only for context.
+
+5. Your response should address the latest questions based on conversation history.
+
+Example:
+- If history has: "What is AI?" followed by "Tell me about ML", you should answer "Tell me about ML" based on conversation history`,
 			model: createModel(),
 			thinkingLevel: "off",
 			messages: [],
 			tools: [],
 		},
 		convertToLlm: (agentMessages) => {
-			return agentMessages.flatMap((m: any) => {
+			// Debug: log what we received
+			console.log("convertToLlm called, agentMessages count:", agentMessages.length);
+			for (const m of agentMessages) {
+				const contentPreview = Array.isArray(m.content)
+					? m.content.map((c: any) => c.text || c.thinking || String(c)).join("")
+					: typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+				console.log("  - role:", m.role, "content:", contentPreview.substring(0, 80));
+			}
+
+			// Messages must strictly alternate: user → assistant → user → assistant → user
+			const MAX_CONTEXT = 30;
+			const recentMessages = agentMessages.slice(-MAX_CONTEXT);
+
+			// Helper to extract text from content (which can be string, array of blocks, or object)
+			function extractText(content: any): string {
+				if (!content) return "";
+				if (typeof content === "string") return content;
+				if (Array.isArray(content)) {
+					return content.map((block: any) => {
+						if (typeof block === "string") return block;
+						return block.text || block.thinking || "";
+					}).join("");
+				}
+				if (typeof content === "object") {
+					return content.text || JSON.stringify(content);
+				}
+				return String(content);
+			}
+
+			// Convert to the format we need
+			const converted = recentMessages.map((m: any) => {
 				if (m.role === "user" || m.role === "user-with-attachments") {
-					const content = typeof m.content === "string" ? m.content : m.content?.[0]?.text || "";
-					return [{ role: "user", content }];
+					const content = extractText(m.content);
+					return { role: "user" as const, content };
 				}
 				if (m.role === "assistant") {
-					// Handle various content formats
-					let text = "";
-					if (!m.content) {
-						text = "";
-					} else if (typeof m.content === "string") {
-						text = m.content;
-					} else if (Array.isArray(m.content)) {
-						text = m.content.map((block: any) => block.text || block.thinking || "").join("");
-					} else if (typeof m.content === "object" && m.content.text) {
-						text = m.content.text;
-					}
-					return [{ role: "assistant", content: text }];
+					const content = extractText(m.content);
+					return { role: "assistant" as const, content };
 				}
+				return null;
+			}).filter(Boolean);
+
+			// Ensure strict alternation
+			const result: Array<{ role: string; content: string }> = [];
+
+			// Find the last user message (current question)
+			let lastUserIdx = -1;
+			for (let i = converted.length - 1; i >= 0; i--) {
+				if (converted[i].role === "user") {
+					lastUserIdx = i;
+					break;
+				}
+			}
+
+			if (lastUserIdx === -1) {
 				return [];
+			}
+
+			// If this is the first message (no history), just return it
+			if (lastUserIdx === 0) {
+				result.push(converted[0]);
+				return result;
+			}
+
+			// Only keep the IMMEDIATE previous pair (one user + one assistant) as brief context
+			// Skip older history to avoid repetition and token bloat
+			const immediateContextStart = Math.max(0, lastUserIdx - 2);
+
+			result.push({
+				role: "system",
+				content: "[Previous context for reference only]"
 			});
+
+			// Only add the most recent exchange as context
+			for (let i = immediateContextStart; i < lastUserIdx; i++) {
+				result.push(converted[i]);
+			}
+
+			result.push(converted[lastUserIdx]);
+
+			// Debug: log the final result
+			console.log("convertToLlm result:");
+			for (const r of result) {
+				console.log("  - role:", r.role, "content length:", r.content.length, "preview:", r.content.substring(0, 50));
+			}
+
+			return result;
 		},
 	});
 	console.log("Agent initialized successfully");
 
 	agent.subscribe((event: any) => {
-		if (event.type === "agent_start") {
-			console.log("agent_start");
-		}
-		if (event.type === "agent_end") {
-			console.log("agent_end");
-		}
 		if (event.type === "message_start") {
+			if (event.message?.role === "user") {
+				// User message started - add it to UI immediately
+				messages.push({ role: "user", content: event.message.content?.[0]?.text || "" });
+			}
 			if (event.message?.role === "assistant") {
 				streamingContent = "";
 				currentAssistantIndex = -1;
@@ -120,7 +197,6 @@ async function sendMessage(content: string) {
 
 	isLoading = true;
 	pendingMessageEnd = false;
-	messages.push({ role: "user", content });
 	renderUI();
 
 	try {
