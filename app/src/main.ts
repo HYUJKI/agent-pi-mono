@@ -39,9 +39,13 @@ let fileInput: HTMLInputElement;
 let imageInput: HTMLInputElement;
 let attachmentsPreview: HTMLElement;
 let statusDot: HTMLElement;
+let stopBtn: HTMLButtonElement;
 
 // Pending attachments
 let pendingAttachments: Attachment[] = [];
+
+// Abort controller for canceling requests
+let currentController: AbortController | null = null;
 
 // Initialize
 function init() {
@@ -95,6 +99,18 @@ function renderApp() {
             <span class="status-dot ${isLoading ? 'warning' : ''}" id="statusDot"></span>
             <span>${isLoading ? 'Processing...' : 'Ready'}</span>
           </div>
+          ${
+            isLoading
+              ? `
+          <button class="stop-btn" id="stopBtn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12" rx="2"/>
+            </svg>
+            Stop
+          </button>
+          `
+              : ""
+          }
           <div class="status-item">
             <span>Session: ${sessionId ? sessionId.substring(0, 8) + '...' : 'None'}</span>
           </div>
@@ -215,6 +231,17 @@ function renderApp() {
   imageInput = document.getElementById("imageInput") as HTMLInputElement;
   attachmentsPreview = document.getElementById("attachmentsPreview")!;
   statusDot = document.getElementById("statusDot")!;
+  stopBtn = document.getElementById("stopBtn") as HTMLButtonElement;
+
+  // Stop button handler
+  if (stopBtn) {
+    stopBtn.addEventListener("click", () => {
+      if (currentController) {
+        currentController.abort();
+        console.log("Request aborted by user");
+      }
+    });
+  }
 
   // Auto-resize textarea
   autoResize(messageInput);
@@ -354,10 +381,16 @@ function escapeHtml(text: string): string {
 // Render streaming content
 function renderStreamingContent() {
   const messagesContainer = document.getElementById("messagesContainer");
-  if (!messagesContainer) return;
+  if (!messagesContainer) {
+    console.log("[DEBUG] messagesContainer not found!");
+    return;
+  }
 
   const lastMessage = messagesContainer.querySelector(".message.assistant:last-child");
-  if (!lastMessage) return;
+  if (!lastMessage) {
+    console.log("[DEBUG] lastMessage not found!");
+    return;
+  }
 
   const contentEl = lastMessage.querySelector(".message-content") as HTMLElement;
   if (!contentEl) return;
@@ -554,14 +587,15 @@ async function sendMessage() {
   };
   messages.push(assistantMessage);
 
-  // Render initial assistant message with loading
-  const assistantEl = document.querySelector('.message.assistant:last-child .message-content');
-  if (assistantEl) {
-    (assistantEl as HTMLElement).innerHTML = '<span class="typing-cursor"></span>';
-  }
+  // Re-render to show assistant message placeholder
+  renderApp();
+
   scrollToBottom();
 
   try {
+    // Create abort controller
+    currentController = new AbortController();
+
     // Prepare attachments for API
     const attachments = userMessage.attachments?.map((a) => ({
       type: a.type,
@@ -579,6 +613,7 @@ async function sendMessage() {
         session_id: sessionId,
         attachments,
       }),
+      signal: currentController.signal,
     });
 
     if (!response.ok) {
@@ -609,15 +644,34 @@ async function sendMessage() {
 
           try {
             const parsed = JSON.parse(data);
-            console.log("SSE data:", parsed);
 
             if (parsed.content) {
+              console.log("[SSE] Content update received:", parsed.content.substring(0, 50));
               currentStreamContent = [{ type: "text", content: parsed.content }];
               const lastAssistant = messages[messages.length - 1];
               if (lastAssistant && lastAssistant.role === "assistant") {
                 lastAssistant.content = parsed.content;
               }
               renderStreamingContent();
+            } else if (parsed.type === "session_update") {
+              if (parsed.session_id) {
+                sessionId = parsed.session_id;
+                console.log("Session ID received:", sessionId);
+                saveSession();
+              }
+            } else if (parsed.type === "agent_end") {
+              console.log("[SSE] agent_end received");
+              // Ensure sessionId is saved after agent ends
+              if (sessionId) {
+                saveSession();
+              }
+              if (messages[messages.length - 1]?.role === "assistant") {
+                const finalContent = currentStreamContent
+                  .filter((c) => c.type === "text")
+                  .map((c) => c.content)
+                  .join("");
+                messages[messages.length - 1].content = finalContent;
+              }
             } else if (parsed.type === "tool_start") {
               currentStreamContent.push({
                 type: "tool",
@@ -627,35 +681,41 @@ async function sendMessage() {
               renderStreamingContent();
             } else if (parsed.type === "tool_end") {
               // Tool finished
-            } else if (parsed.type === "agent_end") {
-              if (messages[messages.length - 1]?.role === "assistant") {
-                messages[messages.length - 1].content = currentStreamContent
-                  .filter((c) => c.type === "text")
-                  .map((c) => c.content)
-                  .join("");
-              }
             }
           } catch (e) {
-            console.error("JSON parse error:", e, "data:", data);
+            console.error("[SSE] JSON parse error:", e);
           }
         }
       }
     }
   } catch (error: any) {
     console.error("Send error:", error);
-    // Remove the placeholder assistant message on error
-    if (messages.length > 0 && messages[messages.length - 1]?.role === "assistant" && !messages[messages.length - 1]?.content) {
-      messages.pop(); // Remove empty placeholder
+    // Check if aborted
+    if (error.name === "AbortError") {
+      console.log("Request was aborted");
+      // Keep the partial response
+      if (messages[messages.length - 1]?.role === "assistant") {
+        messages[messages.length - 1].content = currentStreamContent
+          .filter((c) => c.type === "text")
+          .map((c) => c.content)
+          .join("");
+      }
+    } else {
+      // Remove the placeholder assistant message on error
+      if (messages.length > 0 && messages[messages.length - 1]?.role === "assistant" && !messages[messages.length - 1]?.content) {
+        messages.pop(); // Remove empty placeholder
+      }
+      // Show error as a new assistant message
+      messages.push({
+        id: generateId(),
+        role: "assistant",
+        content: `Error: ${error.message}`,
+        timestamp: Date.now(),
+      });
     }
-    // Show error as a new assistant message
-    messages.push({
-      id: generateId(),
-      role: "assistant",
-      content: `Error: ${error.message}`,
-      timestamp: Date.now(),
-    });
   }
 
+  currentController = null;
   isLoading = false;
   renderApp();
   saveSession();

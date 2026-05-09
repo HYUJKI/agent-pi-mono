@@ -248,6 +248,31 @@ body {
   background: var(--error);
 }
 
+/* Stop Button */
+.stop-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--error);
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.stop-btn:hover {
+  opacity: 0.9;
+  transform: scale(1.02);
+}
+
+.stop-btn svg {
+  fill: currentColor;
+}
+
 /* Main Chat Area */
 .chat-area {
   flex: 1;

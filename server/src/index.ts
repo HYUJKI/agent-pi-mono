@@ -52,22 +52,49 @@ const SYSTEM_PROMPT = `You are a helpful AI assistant with access to various too
 2. **Web Search**: You can search the web for real-time information, facts, and news.
 3. **Image Generation**: You can generate images based on descriptions.
 
+## Multi-Turn Conversation
+- You are engaged in a continuous multi-turn conversation with the user.
+- ALWAYS maintain and reference the full conversation history from previous turns.
+- When the user asks follow-up questions or refers to previous topics, use the conversation context to provide relevant responses.
+- Do NOT ask the user to repeat information they have already provided.
+- If the user says "continue", "go on", or similar, continue from where you left off.
+- Remember key details from earlier in the conversation (file names, paths, user preferences, etc.).
+
 ## Rules
 1. Always respond in the same language as the user.
-2. Only answer the LATEST user message. Do NOT repeat or summarize previous questions.
+2. Use the conversation history to understand context and references in the user's messages.
 3. Use tools when appropriate to provide accurate, up-to-date information.
 4. For file operations, use the working directory as base path.
 5. When generating files or images, provide download links/buttons in your response.
 6. Always provide code with proper syntax highlighting when showing code.
+7. Do not repeat or summarize previous questions - just answer the current question.
 
 ## Context Management
-- You maintain conversation history internally
-- Only respond to the current question based on relevant context
-- Do not repeat explanations or information from previous responses`;
+- The conversation history is automatically maintained between turns.
+- Respond naturally to follow-up questions that reference previous responses.
+- Keep track of important context across the conversation.`;
 
 // Create agent with tools
 function createAgent(sessionId: string): Agent {
   const session = sessions.get(sessionId);
+
+  // Normalize session messages to ensure content is always in array format
+  const normalizeMessages = (messages: any[]): any[] => {
+    return messages.map((m) => {
+      // If content is a string, convert to array format
+      if (typeof m.content === "string") {
+        return {
+          ...m,
+          content: [{ type: "text", text: m.content }],
+        };
+      }
+      return m;
+    });
+  };
+
+  const normalizedMessages = session?.messages ? normalizeMessages(session.messages) : [];
+
+  console.log(`[Agent] Creating agent for session ${sessionId}, history length: ${normalizedMessages.length}`);
 
   const agent = new Agent({
     getApiKey: () => API_KEY,
@@ -75,19 +102,34 @@ function createAgent(sessionId: string): Agent {
       systemPrompt: SYSTEM_PROMPT,
       model: createModel(),
       thinkingLevel: "off",
-      messages: [],
+      messages: normalizedMessages,
       tools: [...fileTools, webSearchTool],
     },
     convertToLlm: (agentMessages) => {
-      // Simple passthrough - agent manages its own context
+      // Convert agent messages to LLM message format
+      // Ensure content is always in array format for consistency
+      console.log(`[convertToLlm] Converting ${agentMessages.length} messages to LLM format`);
       return agentMessages.map((m: any) => {
         if (m.role === "user" || m.role === "user-with-attachments") {
-          const content = (m.content || []).map((c: any) => c.text || c.imageUrl || "").join("");
-          return { role: "user" as const, content };
+          // Ensure content is an array of content blocks
+          if (typeof m.content === "string") {
+            return { role: "user" as const, content: [{ type: "text", text: m.content }] };
+          }
+          // Already in array format, pass through
+          const text = (m.content || []).map((c: any) => c.text || c.imageUrl || "").join("");
+          return { role: "user" as const, content: [{ type: "text", text }] };
         }
         if (m.role === "assistant") {
-          const text = (m.content || []).map((c: any) => c.text || "").join("");
-          return { role: "assistant" as const, content: text };
+          // Extract text from content array
+          if (Array.isArray(m.content)) {
+            const text = m.content.map((c: any) => c.text || "").join("");
+            return { role: "assistant" as const, content: [{ type: "text", text }] };
+          }
+          return { role: "assistant" as const, content: [{ type: "text", text: m.content || "" }] };
+        }
+        if (m.role === "toolResult") {
+          // toolResult messages should pass through with their content array
+          return m;
         }
         return null;
       }).filter(Boolean);
@@ -191,35 +233,16 @@ app.post("/api/chat", async (req, res) => {
           res.write(`event: tool_end\ndata: ${JSON.stringify({ tool: event.toolName, result: event.result })}\n\n`);
           break;
         case "agent_end":
-          // Extract final assistant message text
-          const messages = event.messages || [];
-          const lastMsg = messages[messages.length - 1];
+          // Update session with final messages
+          sessions.set(sessionId, {
+            ...session,
+            messages: agent.state.messages as any,
+          });
 
-          if (lastMsg?.role === "assistant" && lastMsg.content) {
-            // Try to find text content
-            const textContent = lastMsg.content
-              .filter((c: any) => c.type === "text")
-              .map((c: any) => c.text)
-              .join("");
+          console.log(`[Agent] Session ${sessionId} updated with ${agent.state.messages.length} messages`);
 
-            if (textContent) {
-              lastAssistantText = textContent;
-              res.write(`event: message_update\ndata: ${JSON.stringify({ content: textContent })}\n\n`);
-            } else if (lastMsg.errorMessage) {
-              // API error
-              res.write(`event: error\ndata: ${JSON.stringify({ error: lastMsg.errorMessage })}\n\n`);
-            } else if (lastMsg.stopReason === "toolUse") {
-              // Tool was used but no final text - check thinking
-              const thinking = lastMsg.content
-                .filter((c: any) => c.type === "thinking")
-                .map((c: any) => c.thinking)
-                .join("");
-              if (thinking) {
-                lastAssistantText = thinking;
-                res.write(`event: message_update\ndata: ${JSON.stringify({ content: thinking })}\n\n`);
-              }
-            }
-          }
+          // Send session_id back to client
+          res.write(`event: session_update\ndata: ${JSON.stringify({ session_id: sessionId })}\n\n`);
 
           res.write(`event: agent_end\ndata: ${JSON.stringify({ messages: event.messages })}\n\n`);
           res.end();
@@ -233,12 +256,6 @@ app.post("/api/chat", async (req, res) => {
     } else {
       await agent.prompt(messageContent);
     }
-
-    // Update session messages
-    sessions.set(sessionId, {
-      ...session,
-      messages: agent.state.messages as any,
-    });
 
   } catch (error: any) {
     console.error("Chat error:", error);
