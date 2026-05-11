@@ -164,16 +164,6 @@ function renderApp() {
           <div class="messages-container" id="messagesContainer">
             ${messages.map((m) => renderMessage(m)).join("")}
           </div>
-          ${
-            isLoading
-              ? `
-            <div class="loading-indicator">
-              <span class="typing-cursor"></span>
-              <span>Thinking...</span>
-            </div>
-          `
-              : ""
-          }
         `
         }
       </main>
