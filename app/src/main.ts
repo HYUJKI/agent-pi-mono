@@ -49,8 +49,8 @@ let currentController: AbortController | null = null;
 
 // Initialize
 function init() {
+  loadSession();     // Load session BEFORE render to restore history
   renderApp();
-  loadSession();
   setupEventListeners();
 }
 
@@ -623,6 +623,7 @@ async function sendMessage() {
     // Handle SSE stream
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
+    let currentEvent = ""; // Track current event type from `event:` lines
 
     while (reader) {
       const { done, value } = await reader.read();
@@ -633,8 +634,9 @@ async function sendMessage() {
       const lines = chunk.split("\n");
 
       for (const line of lines) {
+        // Capture event type — SSE standard: `event: <type>`
         if (line.startsWith("event:")) {
-          console.log("SSE event:", line);
+          currentEvent = line.replace("event:", "").trim();
           continue;
         }
 
@@ -645,42 +647,69 @@ async function sendMessage() {
           try {
             const parsed = JSON.parse(data);
 
-            if (parsed.content) {
-              console.log("[SSE] Content update received:", parsed.content.substring(0, 50));
-              currentStreamContent = [{ type: "text", content: parsed.content }];
-              const lastAssistant = messages[messages.length - 1];
-              if (lastAssistant && lastAssistant.role === "assistant") {
-                lastAssistant.content = parsed.content;
-              }
-              renderStreamingContent();
-            } else if (parsed.type === "session_update") {
-              if (parsed.session_id) {
-                sessionId = parsed.session_id;
-                console.log("Session ID received:", sessionId);
-                saveSession();
-              }
-            } else if (parsed.type === "agent_end") {
-              console.log("[SSE] agent_end received");
-              // Ensure sessionId is saved after agent ends
-              if (sessionId) {
-                saveSession();
-              }
-              if (messages[messages.length - 1]?.role === "assistant") {
-                const finalContent = currentStreamContent
-                  .filter((c) => c.type === "text")
-                  .map((c) => c.content)
-                  .join("");
-                messages[messages.length - 1].content = finalContent;
-              }
-            } else if (parsed.type === "tool_start") {
-              currentStreamContent.push({
-                type: "tool",
-                content: "",
-                toolName: parsed.tool,
-              });
-              renderStreamingContent();
-            } else if (parsed.type === "tool_end") {
-              // Tool finished
+            switch (currentEvent) {
+              // -- Text content streaming --
+              case "message_update":
+                if (parsed.content) {
+                  currentStreamContent = [{ type: "text", content: parsed.content }];
+                  const lastAssistant = messages[messages.length - 1];
+                  if (lastAssistant && lastAssistant.role === "assistant") {
+                    lastAssistant.content = parsed.content;
+                  }
+                  renderStreamingContent();
+                }
+                break;
+
+              // -- Message end: capture session_id early if provided --
+              case "message_end":
+                if (parsed.session_id) {
+                  sessionId = parsed.session_id;
+                  console.log("[Session] ID captured from message_end:", sessionId);
+                  saveSession();
+                }
+                break;
+
+              // -- Session ID: critical for multi-turn conversation --
+              case "session_update":
+                if (parsed.session_id) {
+                  sessionId = parsed.session_id;
+                  console.log("[Session] ID received:", sessionId);
+                  saveSession();
+                }
+                break;
+
+              // -- Agent ended: finalize --
+              case "agent_end":
+                console.log("[SSE] agent_end received");
+                if (sessionId) {
+                  saveSession();
+                }
+                if (messages[messages.length - 1]?.role === "assistant") {
+                  const finalContent = currentStreamContent
+                    .filter((c) => c.type === "text")
+                    .map((c) => c.content)
+                    .join("");
+                  messages[messages.length - 1].content = finalContent;
+                }
+                break;
+
+              // -- Tool events --
+              case "tool_start":
+                currentStreamContent.push({
+                  type: "tool",
+                  content: "",
+                  toolName: parsed.tool,
+                });
+                renderStreamingContent();
+                break;
+
+              case "tool_end":
+                // Tool finished, nothing extra needed
+                break;
+
+              // -- Other events (message_start, message_end, etc.) --
+              default:
+                break;
             }
           } catch (e) {
             console.error("[SSE] JSON parse error:", e);

@@ -223,7 +223,7 @@ app.post("/api/chat", async (req, res) => {
           break;
         case "message_end":
           if (event.message?.role === "assistant") {
-            res.write(`event: message_end\ndata: ${JSON.stringify({ done: true })}\n\n`);
+            res.write(`event: message_end\ndata: ${JSON.stringify({ done: true, session_id: sessionId })}\n\n`);
           }
           break;
         case "tool_execution_start":
@@ -233,13 +233,18 @@ app.post("/api/chat", async (req, res) => {
           res.write(`event: tool_end\ndata: ${JSON.stringify({ tool: event.toolName, result: event.result })}\n\n`);
           break;
         case "agent_end":
-          // Update session with final messages
+          // Filter out toolResult messages from session history
+          // They cause errors when replayed because MiniMax doesn't have the tool call context
+          const messagesWithoutToolResults = (agent.state.messages as any).filter(
+            (m: any) => m.role !== "toolResult"
+          );
+
           sessions.set(sessionId, {
             ...session,
-            messages: agent.state.messages as any,
+            messages: messagesWithoutToolResults,
           });
 
-          console.log(`[Agent] Session ${sessionId} updated with ${agent.state.messages.length} messages`);
+          console.log(`[Agent] Session ${sessionId} updated with ${messagesWithoutToolResults.length} messages (toolResults filtered)`);
 
           // Send session_id back to client
           res.write(`event: session_update\ndata: ${JSON.stringify({ session_id: sessionId })}\n\n`);

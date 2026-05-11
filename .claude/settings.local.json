@@ -2,8 +2,12 @@
   "permissions": {
     "allow": [
       "WebSearch",
+      "FileRead(*)",
+      "FileWrite(*)",
+      "FileEdit(*)",
+      "FileDelete(*)",
       "Bash(npm view pi-mono)",
-      "WebFetch(domain:github.com)",
+      "WebFetch(*)",
       "Bash(git clone https://github.com/badlogic/pi-mono.git \"D:\\\\work\\\\project\\\\pimono-agent\\\\pi-mono\")",
       "Bash(git checkout)",
       "Bash(git fetch --all)",
@@ -13,7 +17,14 @@
       "Bash(tsc --version)",
       "Bash(npm run build)",
       "Bash(npm run build --workspace=app)",
-      "Bash(cd /d D:workprojectpimono-agent)"
+      "Bash(cd /d D:workprojectpimono-agent)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \"3001\\\\|3002\")",
+      "Bash(curl -s http://localhost:3001/api/health)",
+      "Bash(curl -s http://localhost:3002/health)",
+      "Bash(curl:*)",
+      "Bash(tasklist:*)",
+      "Bash(findstr:*)"
     ]
   }
 }
