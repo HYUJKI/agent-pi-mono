@@ -120,10 +120,16 @@ function createAgent(sessionId: string): Agent {
           return { role: "user" as const, content: [{ type: "text", text }] };
         }
         if (m.role === "assistant") {
-          // Extract text from content array
+          // Preserve all content blocks including toolCall, only extract text from text blocks
           if (Array.isArray(m.content)) {
-            const text = m.content.map((c: any) => c.text || "").join("");
-            return { role: "assistant" as const, content: [{ type: "text", text }] };
+            const transformedContent = m.content.map((c: any) => {
+              if (c.type === "text") {
+                return c;
+              }
+              // Preserve toolCall and other block types as-is
+              return c;
+            });
+            return { role: "assistant" as const, content: transformedContent };
           }
           return { role: "assistant" as const, content: [{ type: "text", text: m.content || "" }] };
         }
@@ -199,8 +205,6 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // Subscribe to events for streaming
-    let lastAssistantText = "";
-
     agent.subscribe(async (event: any) => {
       switch (event.type) {
         case "message_start":
@@ -210,13 +214,12 @@ app.post("/api/chat", async (req, res) => {
           break;
         case "message_update":
           if (event.message?.role === "assistant" && event.message.content) {
-            // Extract text content
+            // Extract text content from message, excluding toolCall and other non-text blocks
             const textBlocks = event.message.content
               .filter((c: any) => c.type === "text")
               .map((c: any) => c.text)
               .join("");
             if (textBlocks) {
-              lastAssistantText = textBlocks;
               res.write(`event: message_update\ndata: ${JSON.stringify({ content: textBlocks })}\n\n`);
             }
           }
@@ -233,8 +236,7 @@ app.post("/api/chat", async (req, res) => {
           res.write(`event: tool_end\ndata: ${JSON.stringify({ tool: event.toolName, result: event.result })}\n\n`);
           break;
         case "agent_end":
-          // Filter out toolResult messages from session history
-          // They cause errors when replayed because MiniMax doesn't have the tool call context
+          // Save session with messages (excluding toolResult to avoid multi-turn errors)
           const messagesWithoutToolResults = (agent.state.messages as any).filter(
             (m: any) => m.role !== "toolResult"
           );
@@ -244,7 +246,7 @@ app.post("/api/chat", async (req, res) => {
             messages: messagesWithoutToolResults,
           });
 
-          console.log(`[Agent] Session ${sessionId} updated with ${messagesWithoutToolResults.length} messages (toolResults filtered)`);
+          console.log(`[Agent] Session ${sessionId} updated with ${messagesWithoutToolResults.length} messages`);
 
           // Send session_id back to client
           res.write(`event: session_update\ndata: ${JSON.stringify({ session_id: sessionId })}\n\n`);

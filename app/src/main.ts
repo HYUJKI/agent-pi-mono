@@ -6,6 +6,7 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  thinking?: string; // 思考过程内容
   attachments?: Attachment[];
   timestamp: number;
 }
@@ -30,6 +31,7 @@ let messages: Message[] = [];
 let sessionId: string | null = null;
 let isLoading = false;
 let currentStreamContent: StreamContent[] = [];
+let currentThinking: string = ""; // 当前消息的思考过程
 
 // DOM Elements cache
 let chatArea: HTMLElement;
@@ -280,6 +282,41 @@ function renderMessage(msg: Message): string {
 
   const hasToolContent = currentStreamContent.some((c) => c.type === "tool");
 
+  // For assistant messages, show thinking and final content separately
+  if (msg.role === "assistant") {
+    const hasThinking = msg.thinking && msg.thinking.length > 0;
+    const hasFinalContent = msg.content && msg.content.length > 0;
+    const isStreaming = isLoading && messages[messages.length - 1]?.id === msg.id;
+
+    // Thinking section
+    const thinkingHtml = hasThinking || isStreaming
+      ? `<div class="message-thinking ${isStreaming ? "is-streaming" : ""}">
+          <div class="thinking-content">${escapeHtml(msg.thinking || currentThinking)}</div>
+        </div>`
+      : "";
+
+    // Final content section
+    const finalHtml = hasFinalContent
+      ? `<div class="message-final">${formatContent(msg.content)}</div>`
+      : (!hasThinking && isStreaming
+          ? `<div class="message-final">${formatContent(currentStreamContent.filter(c => c.type === "text").map(c => c.content).join(""))}</div>`
+          : "");
+
+    return `
+      <div class="message ${msg.role} ${hasFinalContent ? "has-final" : ""}">
+        <div class="message-avatar">${avatarIcon}</div>
+        <div class="message-content-wrapper">
+          <div class="message-role">${msg.role === "user" ? "User" : "Assistant"}</div>
+          ${attachmentsHtml}
+          ${thinkingHtml}
+          ${finalHtml}
+          <div class="message-time">${time}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // User messages - no thinking section
   return `
     <div class="message ${msg.role}">
       <div class="message-avatar">${avatarIcon}</div>
@@ -392,37 +429,62 @@ function renderStreamingContent() {
     return;
   }
 
-  const contentEl = lastMessage.querySelector(".message-content") as HTMLElement;
-  if (!contentEl) return;
-
-  let html = "";
-  let hasTool = false;
-
-  for (const item of currentStreamContent) {
-    if (item.type === "text") {
-      html += formatContent(item.content);
-    } else if (item.type === "tool") {
-      hasTool = true;
-      html += `<div class="tool-indicator">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
-        </svg>
-        ${item.toolName}
-      </div>`;
-    } else if (item.type === "image") {
-      html += `<img src="${item.content}" alt="Generated" class="message-image" />`;
-    } else if (item.type === "file") {
-      html += `<a href="${item.downloadUrl}" download="${item.fileName}" class="download-btn">📥 ${item.fileName}</a>`;
+  // Update thinking content
+  const thinkingEl = lastMessage.querySelector(".message-thinking") as HTMLElement;
+  if (thinkingEl) {
+    thinkingEl.classList.add("is-streaming");
+    const thinkingContentEl = thinkingEl.querySelector(".thinking-content");
+    if (thinkingContentEl) {
+      thinkingContentEl.textContent = currentThinking;
     }
   }
 
-  contentEl.className = `message-content ${hasTool ? "has-tool" : ""}`;
-  contentEl.innerHTML = html;
+  // Update final content (text and tools)
+  const finalEl = lastMessage.querySelector(".message-final") as HTMLElement;
+  if (finalEl) {
+    let html = "";
+    let hasTool = false;
 
-  // Apply syntax highlighting to new code blocks
-  contentEl.querySelectorAll("code.hljs").forEach((block) => {
-    hljs.highlightElement(block as HTMLElement);
-  });
+    for (const item of currentStreamContent) {
+      if (item.type === "text") {
+        html += formatContent(item.content);
+      } else if (item.type === "tool") {
+        hasTool = true;
+        html += `<div class="tool-indicator">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+          </svg>
+          ${item.toolName}
+        </div>`;
+      } else if (item.type === "image") {
+        html += `<img src="${item.content}" alt="Generated" class="message-image" />`;
+      } else if (item.type === "file") {
+        html += `<a href="${item.downloadUrl}" download="${item.fileName}" class="download-btn">📥 ${item.fileName}</a>`;
+      }
+    }
+
+    finalEl.innerHTML = html;
+
+    // Apply syntax highlighting to new code blocks
+    finalEl.querySelectorAll("code.hljs").forEach((block) => {
+      hljs.highlightElement(block as HTMLElement);
+    });
+  }
+
+  // If no final element exists but we have text content, create it
+  if (!finalEl && currentStreamContent.some(c => c.type === "text")) {
+    let html = "";
+    for (const item of currentStreamContent) {
+      if (item.type === "text") {
+        html += formatContent(item.content);
+      }
+    }
+    // Create final element
+    const finalDiv = document.createElement("div");
+    finalDiv.className = "message-final";
+    finalDiv.innerHTML = html;
+    lastMessage.querySelector(".message-content-wrapper")?.appendChild(finalDiv);
+  }
 
   scrollToBottom();
 }
@@ -648,6 +710,26 @@ async function sendMessage() {
             const parsed = JSON.parse(data);
 
             switch (currentEvent) {
+              // -- Thinking content streaming --
+              case "thinking_start":
+                currentThinking = "";
+                break;
+
+              case "thinking_update":
+                if (parsed.content !== undefined) {
+                  currentThinking = parsed.content;
+                  const lastAssistant = messages[messages.length - 1];
+                  if (lastAssistant && lastAssistant.role === "assistant") {
+                    lastAssistant.thinking = parsed.content;
+                  }
+                  renderStreamingContent();
+                }
+                break;
+
+              case "thinking_end":
+                // Thinking finished, will transition to text output
+                break;
+
               // -- Text content streaming --
               case "message_update":
                 if (parsed.content) {
