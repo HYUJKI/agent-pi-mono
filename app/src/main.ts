@@ -689,7 +689,18 @@ async function sendMessage() {
                     .filter((c) => c.type === "text")
                     .map((c) => c.content)
                     .join("");
-                  messages[messages.length - 1].content = finalContent;
+
+                  // Check if this is an error state from MiniMax after tool execution
+                  if (parsed.messages && parsed.messages.length > 0) {
+                    const lastMsg = parsed.messages[parsed.messages.length - 1];
+                    if (lastMsg.errorMessage) {
+                      // MiniMax API error after tool execution - display error
+                      messages[messages.length - 1].content = `Tool execution error: ${lastMsg.errorMessage}`;
+                      break;
+                    }
+                  }
+
+                  messages[messages.length - 1].content = finalContent || "No response received";
                 }
                 break;
 
