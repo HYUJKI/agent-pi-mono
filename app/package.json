@@ -12,9 +12,11 @@
     "@mariozechner/pi-agent-core": "file:../packages/agent",
     "@mariozechner/pi-ai": "file:../packages/ai",
     "highlight.js": "^11.9.0",
-    "lit": "^3.3.1"
+    "lit": "^3.3.1",
+    "marked": "^18.0.3"
   },
   "devDependencies": {
+    "@types/marked": "^5.0.2",
     "@types/node": "^20.11.0",
     "typescript": "^5.7.3",
     "vite": "^7.1.6"

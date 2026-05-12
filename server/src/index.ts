@@ -101,7 +101,7 @@ function createAgent(sessionId: string): Agent {
     initialState: {
       systemPrompt: SYSTEM_PROMPT,
       model: createModel(),
-      thinkingLevel: "off",
+      thinkingLevel: "medium",
       messages: normalizedMessages,
       tools: [...fileTools, webSearchTool],
     },
@@ -205,12 +205,28 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // Subscribe to events for streaming
+    let currentThinking = "";
+
     agent.subscribe(async (event: any) => {
       switch (event.type) {
         case "message_start":
           if (event.message?.role === "assistant") {
             res.write(`event: message_start\ndata: ${JSON.stringify({ role: "assistant" })}\n\n`);
           }
+          break;
+        case "thinking_start":
+          currentThinking = "";
+          res.write(`event: thinking_start\ndata: ${JSON.stringify({})}\n\n`);
+          break;
+        case "thinking_delta":
+          if (event.delta) {
+            currentThinking += event.delta;
+            res.write(`event: thinking_update\ndata: ${JSON.stringify({ content: currentThinking })}\n\n`);
+          }
+          break;
+        case "thinking_end":
+          res.write(`event: thinking_end\ndata: ${JSON.stringify({ content: currentThinking })}\n\n`);
+          currentThinking = "";
           break;
         case "message_update":
           if (event.message?.role === "assistant" && event.message.content) {

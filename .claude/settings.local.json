@@ -7,7 +7,8 @@
       "FileWrite(*)",
       "FileEdit(*)",
       "FileDelete(*)",
-      "Bash(*)"
+      "Bash(*)",
+      "Bash(npm install:*)"
     ]
   }
 }

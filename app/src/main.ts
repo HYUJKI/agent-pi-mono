@@ -1,5 +1,12 @@
 import "./styles.css";
 import hljs from "highlight.js";
+import { marked } from "marked";
+
+// Configure marked for better output
+marked.setOptions({
+  gfm: true,
+  breaks: true,
+});
 
 // State
 interface Message {
@@ -32,6 +39,11 @@ let sessionId: string | null = null;
 let isLoading = false;
 let currentStreamContent: StreamContent[] = [];
 let currentThinking: string = ""; // 当前消息的思考过程
+let actualTextContent: string = ""; // 实际应显示的完整文本
+let displayedTextContent: string = ""; // 当前已显示的文本（动画用）
+let animationFrameId: number | null = null;
+let lastCharTime: number = 0;
+const CHAR_ANIMATION_DELAY = 15; // 每个字符动画延迟（毫秒）
 
 // DOM Elements cache
 let chatArea: HTMLElement;
@@ -324,78 +336,49 @@ function renderMessage(msg: Message): string {
 function formatContent(content: string): string {
   if (!content) return "";
 
-  // Escape HTML first
-  let formatted = escapeHtml(content);
+  // Create custom renderer for code blocks with syntax highlighting
+  const renderer = new marked.Renderer();
 
-  // Code blocks with highlighting
-  formatted = formatted.replace(
-    /```(\w+)?\n([\s\S]*?)```/g,
-    (_, lang, code) => {
-      const language = lang || "plaintext";
-      let highlighted: string;
-      try {
-        highlighted = hljs.highlight(code.trim(), { language }).value;
-      } catch {
-        highlighted = escapeHtml(code.trim());
-      }
-      return `
-        <div class="code-block">
-          <div class="code-header">
-            <div class="code-dots">
-              <span class="code-dot red"></span>
-              <span class="code-dot yellow"></span>
-              <span class="code-dot green"></span>
-            </div>
-            <span class="code-language">${language}</span>
-            <button class="code-copy" onclick="copyCode(this)">Copy</button>
-          </div>
-          <pre><code class="hljs language-${language}">${highlighted}</code></pre>
-        </div>
-      `;
+  renderer.code = function({ text, lang }: { text: string; lang?: string }) {
+    const language = lang || "plaintext";
+    let highlighted: string;
+    try {
+      highlighted = hljs.highlight(text.trim(), { language }).value;
+    } catch {
+      highlighted = escapeHtml(text.trim());
     }
-  );
+    return `
+      <div class="code-block">
+        <div class="code-header">
+          <div class="code-dots">
+            <span class="code-dot red"></span>
+            <span class="code-dot yellow"></span>
+            <span class="code-dot green"></span>
+          </div>
+          <span class="code-language">${language}</span>
+          <button class="code-copy" onclick="copyCode(this)">Copy</button>
+        </div>
+        <pre><code class="hljs language-${language}">${highlighted}</code></pre>
+      </div>
+    `;
+  };
 
-  // Inline code
-  formatted = formatted.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+  // Parse markdown with custom renderer
+  let html = marked.parse(content, { renderer }) as string;
 
-  // Bold
-  formatted = formatted.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-
-  // Italic
-  formatted = formatted.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-
-  // Links
-  formatted = formatted.replace(
-    /\[([^\]]+)\]\(([^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener">$1</a>'
-  );
-
-  // Tool indicators in text
-  formatted = formatted.replace(
+  // Tool indicators - convert [使用工具: xxx] to styled div
+  html = html.replace(
     /\[(使用工具|Using tool): ([^\]]+)\]/g,
     '<div class="tool-indicator"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg> $2</div>'
   );
 
-  // Lists
-  formatted = formatted.replace(/^- (.+)$/gm, "<li>$1</li>");
-  formatted = formatted.replace(/(<li>.*<\/li>)/s, "<ul>$1</ul>");
-
-  // Line breaks
-  formatted = formatted.replace(/\n/g, "<br>");
-
   // Download links for generated files
-  formatted = formatted.replace(
+  html = html.replace(
     /\[下载文件: ([^\]]+)\]\(([^)]+)\)/g,
     '<a href="$2" download="$1" class="download-btn">📥 $1</a>'
   );
 
-  // Image display
-  formatted = formatted.replace(
-    /!\[([^\]]*)\]\(([^)]+)\)/g,
-    '<img src="$2" alt="$1" class="message-image" />'
-  );
-
-  return formatted;
+  return html;
 }
 
 // Escape HTML special characters
@@ -403,6 +386,54 @@ function escapeHtml(text: string): string {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+// Animate text character by character
+function animateTextContent() {
+  if (!isLoading) return;
+
+  const now = performance.now();
+  const messagesContainer = document.getElementById("messagesContainer");
+  if (!messagesContainer) return;
+
+  const lastMessage = messagesContainer.querySelector(".message.assistant:last-child");
+  if (!lastMessage) return;
+
+  const finalEl = lastMessage.querySelector(".message-final");
+  if (!finalEl) return;
+
+  // If displayed text hasn't reached actual text, continue animation
+  if (displayedTextContent.length < actualTextContent.length) {
+    // Calculate how many characters to add based on time elapsed
+    const timeSinceLastChar = now - lastCharTime;
+
+    if (timeSinceLastChar >= CHAR_ANIMATION_DELAY) {
+      // Add one or more characters
+      const charsToAdd = Math.floor(timeSinceLastChar / CHAR_ANIMATION_DELAY);
+      displayedTextContent = actualTextContent.substring(0, displayedTextContent.length + charsToAdd);
+      lastCharTime = now;
+
+      // Update the display with formatted markdown
+      finalEl.innerHTML = formatContent(displayedTextContent);
+
+      // Apply syntax highlighting to code blocks
+      finalEl.querySelectorAll("code.hljs").forEach((block) => {
+        hljs.highlightElement(block as HTMLElement);
+      });
+
+      scrollToBottom();
+    }
+
+    // Continue animation
+    animationFrameId = requestAnimationFrame(animateTextContent);
+  } else {
+    // Animation complete - ensure final content is fully rendered
+    finalEl.innerHTML = formatContent(actualTextContent);
+    finalEl.querySelectorAll("code.hljs").forEach((block) => {
+      hljs.highlightElement(block as HTMLElement);
+    });
+    animationFrameId = null;
+  }
 }
 
 // Render streaming content
@@ -419,9 +450,19 @@ function renderStreamingContent() {
     return;
   }
 
-  // Update thinking content
-  const thinkingEl = lastMessage.querySelector(".message-thinking") as HTMLElement;
-  if (thinkingEl) {
+  const wrapper = lastMessage.querySelector(".message-content-wrapper");
+  if (!wrapper) return;
+
+  // Update or create thinking content
+  let thinkingEl = lastMessage.querySelector(".message-thinking") as HTMLElement;
+  if (currentThinking) {
+    if (!thinkingEl) {
+      // Create thinking element if it doesn't exist
+      thinkingEl = document.createElement("div");
+      thinkingEl.className = "message-thinking is-streaming";
+      thinkingEl.innerHTML = '<div class="thinking-content"></div>';
+      wrapper.insertBefore(thinkingEl, wrapper.querySelector(".message-final") || null);
+    }
     thinkingEl.classList.add("is-streaming");
     const thinkingContentEl = thinkingEl.querySelector(".thinking-content");
     if (thinkingContentEl) {
@@ -429,31 +470,46 @@ function renderStreamingContent() {
     }
   }
 
-  // Update final content (text and tools)
-  const finalEl = lastMessage.querySelector(".message-final") as HTMLElement;
-  if (finalEl) {
-    let html = "";
-    let hasTool = false;
+  // Get current text content from stream
+  const currentText = currentStreamContent
+    .filter((c) => c.type === "text")
+    .map((c) => c.content)
+    .join("");
 
-    for (const item of currentStreamContent) {
-      if (item.type === "text") {
-        html += formatContent(item.content);
-      } else if (item.type === "tool") {
-        hasTool = true;
-        html += `<div class="tool-indicator">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
-          </svg>
-          ${item.toolName}
-        </div>`;
-      } else if (item.type === "image") {
-        html += `<img src="${item.content}" alt="Generated" class="message-image" />`;
-      } else if (item.type === "file") {
-        html += `<a href="${item.downloadUrl}" download="${item.fileName}" class="download-btn">📥 ${item.fileName}</a>`;
-      }
+  // Update actual and displayed text if there's new content
+  if (currentText !== actualTextContent) {
+    actualTextContent = currentText;
+    if (displayedTextContent.length === 0 || displayedTextContent.length >= actualTextContent.length) {
+      displayedTextContent = actualTextContent;
     }
+    lastCharTime = performance.now();
+  }
 
-    finalEl.innerHTML = html;
+  // Update final content (text and tools)
+  let finalEl = lastMessage.querySelector(".message-final") as HTMLElement;
+
+  // Collect tool and other non-text content immediately
+  let nonTextHtml = "";
+  let hasTool = false;
+  for (const item of currentStreamContent) {
+    if (item.type === "tool") {
+      hasTool = true;
+      nonTextHtml += `<div class="tool-indicator">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+        </svg>
+        ${item.toolName}
+      </div>`;
+    } else if (item.type === "image") {
+      nonTextHtml += `<img src="${item.content}" alt="Generated" class="message-image" />`;
+    } else if (item.type === "file") {
+      nonTextHtml += `<a href="${item.downloadUrl}" download="${item.fileName}" class="download-btn">📥 ${item.fileName}</a>`;
+    }
+  }
+
+  if (finalEl) {
+    // Update non-text content immediately
+    finalEl.innerHTML = formatContent(displayedTextContent) + nonTextHtml;
 
     // Apply syntax highlighting to new code blocks
     finalEl.querySelectorAll("code.hljs").forEach((block) => {
@@ -461,19 +517,22 @@ function renderStreamingContent() {
     });
   }
 
-  // If no final element exists but we have text content, create it
-  if (!finalEl && currentStreamContent.some(c => c.type === "text")) {
-    let html = "";
-    for (const item of currentStreamContent) {
-      if (item.type === "text") {
-        html += formatContent(item.content);
-      }
-    }
-    // Create final element
-    const finalDiv = document.createElement("div");
-    finalDiv.className = "message-final";
-    finalDiv.innerHTML = html;
-    lastMessage.querySelector(".message-content-wrapper")?.appendChild(finalDiv);
+  // If no final element exists, create it
+  if (!finalEl && (currentText || nonTextHtml)) {
+    finalEl = document.createElement("div");
+    finalEl.className = "message-final";
+    finalEl.innerHTML = formatContent(displayedTextContent) + nonTextHtml;
+    wrapper.appendChild(finalEl);
+  }
+
+  // Hide thinking when final content starts arriving
+  if (currentText && thinkingEl) {
+    thinkingEl.style.display = "none";
+  }
+
+  // Start or continue animation if there's text to animate
+  if (displayedTextContent.length < actualTextContent.length && !animationFrameId) {
+    animationFrameId = requestAnimationFrame(animateTextContent);
   }
 
   scrollToBottom();
@@ -608,6 +667,13 @@ async function sendMessage() {
 
   isLoading = true;
   currentStreamContent = [];
+  currentThinking = "";
+  actualTextContent = "";
+  displayedTextContent = "";
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
 
   // Add user message
   const userMessage: Message = {
@@ -718,6 +784,14 @@ async function sendMessage() {
 
               case "thinking_end":
                 // Thinking finished, will transition to text output
+                // Hide thinking element when thinking ends
+                if (lastAssistant) {
+                  lastAssistant.thinking = currentThinking;
+                }
+                const thinkingEl = document.querySelector(".message.assistant:last-child .message-thinking");
+                if (thinkingEl) {
+                  thinkingEl.classList.remove("is-streaming");
+                }
                 break;
 
               // -- Text content streaming --
@@ -827,6 +901,15 @@ async function sendMessage() {
     }
   }
 
+  // Cleanup animation state
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+
+  // Ensure final content is fully displayed
+  displayedTextContent = actualTextContent;
+
   currentController = null;
   isLoading = false;
   renderApp();
@@ -839,6 +922,13 @@ function newChat() {
   sessionId = null;
   pendingAttachments = [];
   currentStreamContent = [];
+  currentThinking = "";
+  actualTextContent = "";
+  displayedTextContent = "";
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
   localStorage.removeItem("pimono_session");
   localStorage.removeItem("pimono_messages");
   renderApp();
