@@ -339,25 +339,40 @@ function formatContent(content: string): string {
   // Create custom renderer for code blocks with syntax highlighting
   const renderer = new marked.Renderer();
 
+  // 1. 自定义 Marked 渲染器：重写「代码块」的渲染方法
   renderer.code = function({ text, lang }: { text: string; lang?: string }) {
+
+    // 2. 处理代码语言：没指定语言就用 plaintext（纯文本）
     const language = lang || "plaintext";
+
+    // 3. 定义变量存储「高亮后的代码」
     let highlighted: string;
+
     try {
-      highlighted = hljs.highlight(text.trim(), { language }).value;
+        // 4. 用 highlight.js 给代码做语法高亮
+        highlighted = hljs.highlight(text.trim(), { language }).value;
     } catch {
-      highlighted = escapeHtml(text.trim());
+        // 5. 高亮失败 → 转义 HTML 字符，防止代码破坏页面
+        highlighted = escapeHtml(text.trim());
     }
+
+    // 6. 返回最终渲染的 HTML 结构（精美代码块）
     return `
       <div class="code-block">
+        <!-- 代码块顶部栏 -->
         <div class="code-header">
+          <!-- 三色小圆点：红、黄、绿（模仿编辑器） -->
           <div class="code-dots">
             <span class="code-dot red"></span>
             <span class="code-dot yellow"></span>
             <span class="code-dot green"></span>
           </div>
+          <!-- 显示代码语言：js / python / plaintext -->
           <span class="code-language">${language}</span>
+          <!-- 复制按钮，点击执行 copyCode 函数 -->
           <button class="code-copy" onclick="copyCode(this)">Copy</button>
         </div>
+        <!-- 代码内容区域（带高亮） -->
         <pre><code class="hljs language-${language}">${highlighted}</code></pre>
       </div>
     `;
@@ -390,48 +405,71 @@ function escapeHtml(text: string): string {
 
 // Animate text character by character
 function animateTextContent() {
+  // 1. 非加载状态直接退出，不执行动画
   if (!isLoading) return;
 
+  // 获取当前高精度时间（比Date.now更精准，适合动画）
   const now = performance.now();
+  // 获取消息容器DOM
   const messagesContainer = document.getElementById("messagesContainer");
-  if (!messagesContainer) return;
+  if (!messagesContainer) return; // 容器不存在则退出
 
+  // 找到【最后一条AI助手消息】
   const lastMessage = messagesContainer.querySelector(".message.assistant:last-child");
-  if (!lastMessage) return;
+  if (!lastMessage) return; // 没有AI消息则退出
 
+  // 找到消息里用于显示动态文字的元素
   const finalEl = lastMessage.querySelector(".message-final");
-  if (!finalEl) return;
+  if (!finalEl) return; // 元素不存在则退出
 
-  // If displayed text hasn't reached actual text, continue animation
+  // ==============================================
+  // 核心逻辑：如果显示的文字 < 完整文字 → 继续动画
+  // ==============================================
   if (displayedTextContent.length < actualTextContent.length) {
-    // Calculate how many characters to add based on time elapsed
+    // 计算：距离上一次添加文字过去了多少毫秒
     const timeSinceLastChar = now - lastCharTime;
 
+    // 达到了设定的打字延迟（比如50ms），就添加文字
     if (timeSinceLastChar >= CHAR_ANIMATION_DELAY) {
-      // Add one or more characters
+      // 计算本次要添加多少个字（防止掉帧导致文字卡顿）
       const charsToAdd = Math.floor(timeSinceLastChar / CHAR_ANIMATION_DELAY);
+      
+      // 截取完整文本，更新“当前显示文本”
       displayedTextContent = actualTextContent.substring(0, displayedTextContent.length + charsToAdd);
+      
+      // 更新上一次打字时间
       lastCharTime = now;
 
-      // Update the display with formatted markdown
+      // ==============================================
+      // 渲染：把文本格式化（markdown转HTML）并插入DOM
+      // ==============================================
       finalEl.innerHTML = formatContent(displayedTextContent);
 
-      // Apply syntax highlighting to code blocks
+      // 代码块高亮（比如hljs = highlight.js）
       finalEl.querySelectorAll("code.hljs").forEach((block) => {
         hljs.highlightElement(block as HTMLElement);
       });
 
+      // 页面自动滚动到底部（聊天窗口必备）
       scrollToBottom();
     }
 
-    // Continue animation
+    // ==============================================
+    // 关键：请求下一帧，递归继续执行本函数（形成动画循环）
+    // ==============================================
     animationFrameId = requestAnimationFrame(animateTextContent);
-  } else {
-    // Animation complete - ensure final content is fully rendered
+  } 
+  // ==============================================
+  // else：文字已经全部显示 → 动画结束
+  // ==============================================
+  else {
+    // 最终确保渲染完整内容（防止截断）
     finalEl.innerHTML = formatContent(actualTextContent);
+    // 最终代码高亮
     finalEl.querySelectorAll("code.hljs").forEach((block) => {
       hljs.highlightElement(block as HTMLElement);
     });
+    // 清空动画ID，释放资源
     animationFrameId = null;
   }
 }
@@ -718,8 +756,8 @@ async function sendMessage() {
     const attachments = userMessage.attachments?.map((a) => ({
       type: a.type,
       name: a.name,
+      content: a.content, // Send file content directly
       url: a.type === "image" ? a.content : undefined,
-      path: a.type === "file" ? a.name : undefined,
     }));
 
     // Send to API

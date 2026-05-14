@@ -47,9 +47,12 @@ function createModel() {
 // System prompt for the agent
 const SYSTEM_PROMPT = `You are a helpful AI assistant with access to various tools.
 
+## Current Date and Time
+The current date is ${new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}. Always use this as the reference for "today".
+
 ## Your Capabilities
 1. **File Operations**: You can read, write, edit, view, and list files in the local project directory.
-2. **Web Search**: You can search the web for real-time information, facts, and news.
+2. **Web Search**: You can search the web for real-time information, facts, and news. Note: web search returns placeholder data, do NOT rely on it for accurate real-time information.
 3. **Image Generation**: You can generate images based on descriptions.
 
 ## Multi-Turn Conversation
@@ -192,13 +195,11 @@ app.post("/api/chat", async (req, res) => {
             imageUrl: attachment.url,
           });
         } else if (attachment.type === "file") {
-          // Read file content
-          const fs = await import("fs/promises");
-          try {
-            const fileContent = await fs.readFile(attachment.path, "utf-8");
-            messageContent += `\n\n[File: ${attachment.name}]\n${fileContent}`;
-          } catch {
-            messageContent += `\n\n[File: ${attachment.name}] (could not read)`;
+          // Use file content directly from attachment
+          if (attachment.content) {
+            messageContent += `\n\n[File: ${attachment.name}]\n${attachment.content}`;
+          } else {
+            messageContent += `\n\n[File: ${attachment.name}] (no content provided)`;
           }
         }
       }

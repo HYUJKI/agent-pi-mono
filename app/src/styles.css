@@ -567,6 +567,8 @@ body {
   font-size: 14px;
   word-wrap: break-word;
   overflow-wrap: break-word;
+  /* 文字使用默认衬线字体，全角字符正确显示 */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 .message.assistant .message-final {
@@ -796,9 +798,16 @@ body {
   margin: 0;
   padding: 16px;
   overflow-x: auto;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Source Han Mono', 'Noto Sans Mono', 'Microsoft YaHei Mono', monospace;
   font-size: 13px;
   line-height: 1.6;
+  /* 支持全角字符和混合宽度字符 */
+  font-variant-east-asian: normal;
+  /* 保持 ASCII art 等宽字符精确对齐 */
+  white-space: pre;
+  /* 字符间距归一化，避免宽度不一导致错位 */
+  letter-spacing: 0;
+  font-feature-settings: "liga" 0;
 }
 
 .code-block code {

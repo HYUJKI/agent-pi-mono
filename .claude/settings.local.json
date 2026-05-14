@@ -8,7 +8,8 @@
       "FileEdit(*)",
       "FileDelete(*)",
       "Bash(*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(timeout:*)"
     ]
   }
 }
